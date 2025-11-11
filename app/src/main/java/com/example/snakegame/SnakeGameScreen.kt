@@ -36,6 +36,7 @@ import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.sqrt
 
 private const val PREFS_NAME = "snake_prefs"
 private const val KEY_HIGH_SCORE = "high_score"
@@ -51,13 +52,37 @@ fun SnakeGameScreen() {
     val snakeState: MutableState<Snake?> = remember { mutableStateOf(null) }
     val inMenu = remember { mutableStateOf(true) }
 
+    // 获取 context（必须在使用之前声明）
+    val context = LocalContext.current
+    val highScoreState: MutableState<Int> = remember { mutableStateOf(0) }
+
+    // 版本检测状态（只在应用启动时检测一次）
+    val versionStatusState: MutableState<String?> = remember { mutableStateOf(null) }
+    val currentVersion = remember { VersionChecker.getCurrentVersion(context) }
+
     // 食物与分数
     val foodState: MutableState<Food?> = remember { mutableStateOf(null) }
     val scoreState: MutableState<Int> = remember { mutableStateOf(0) }
-    val context = LocalContext.current
-    val highScoreState: MutableState<Int> = remember { mutableStateOf(0) }
+
+
+// 加载最高分
     LaunchedEffect(Unit) {
         highScoreState.value = context.getSharedPreferences(PREFS_NAME, 0).getInt(KEY_HIGH_SCORE, 0)
+    }
+
+    // 只在应用启动时检测一次版本
+    LaunchedEffect(Unit) {
+        val latestVersion = VersionChecker.getLatestVersion()
+        versionStatusState.value =
+            if (latestVersion != null) {
+                if (VersionChecker.isUpdateAvailable(currentVersion, latestVersion)) {
+                    "检测到最新版本v$latestVersion"
+                } else {
+                    "当前为最新版本"
+                }
+            } else {
+                null // 网络错误时不显示版本信息
+            }
     }
 
     // 每帧自增，驱动重绘
@@ -71,6 +96,9 @@ fun SnakeGameScreen() {
 
     // 初始化完成标志
     val isInitialized = remember { mutableStateOf(false) }
+
+    // 长按加速状态
+    val isSpeedUp = remember { mutableStateOf(false) }
 
     // 组合作用域中进行 dp->px 计算，供 Canvas 内部使用
     val density = LocalDensity.current
@@ -184,6 +212,7 @@ fun SnakeGameScreen() {
     if (inMenu.value) {
         StartMenu(
             highScore = highScoreState.value,
+            versionStatus = versionStatusState.value, // 传递版本状态
             onStart = {
                 restartGame() // 重置一切
                 inMenu.value = false // 进入游戏
@@ -200,6 +229,12 @@ fun SnakeGameScreen() {
     val touchStartY = remember { mutableStateOf(0f) }
     val swipeThreshold = 30f
 
+    // 双击检测相关
+    val lastTapTime = remember { mutableStateOf(0L) }
+    val lastTapPosition = remember { mutableStateOf(Offset(0f, 0f)) }
+    val doubleTapTimeout = 300L // 双击时间间隔（毫秒）
+    val doubleTapDistanceThreshold = 50f // 双击位置距离阈值（像素）
+
     Box(
         modifier =
             Modifier
@@ -207,13 +242,40 @@ fun SnakeGameScreen() {
                 .pointerInput(Unit) {
                     awaitEachGesture {
                         val down = awaitFirstDown()
+                        val currentTime = System.currentTimeMillis()
+                        val currentPosition = down.position
+
+                        // 检查是否是双击（欧氏距离）
+                        val timeSinceLastTap = currentTime - lastTapTime.value
+                        val tapDx = currentPosition.x - lastTapPosition.value.x
+                        val tapDy = currentPosition.y - lastTapPosition.value.y
+                        val tapDistance = sqrt(tapDx * tapDx + tapDy * tapDy)
+
+                        if (timeSinceLastTap < doubleTapTimeout && tapDistance < doubleTapDistanceThreshold) {
+                            // 检测到双击，切换暂停状态 + 轻微震动反馈
+                            isPaused.value = !isPaused.value
+                            vibrate(30) // 20~40ms 均可
+                            lastTapTime.value = 0L // 重置，防止三击
+                            return@awaitEachGesture
+                        }
+
+                        // 记录本次点击时间和位置
+                        lastTapTime.value = currentTime
+                        lastTapPosition.value = currentPosition
+
+                        // 原有的滑动控制逻辑
                         touchStartX.value = down.position.x
                         touchStartY.value = down.position.y
 
                         var upX = touchStartX.value
                         var upY = touchStartY.value
 
-                        // 等待手指抬起 - 使用 awaitPointerEvent()（在 awaitEachGesture 作用域内可用）
+                // 长按检测参数
+                val longPressThreshold = 300L
+                val pressStartTime = System.currentTimeMillis()
+                var longPressTriggered = false
+
+                // 等待手指抬起（期间检测长按）
                         do {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull() ?: break
@@ -222,23 +284,41 @@ fun SnakeGameScreen() {
                                 upY = change.position.y
                                 break
                             }
+
+                    // 检测长按：超过阈值触发加速与震动
+                    if (!longPressTriggered &&
+                        System.currentTimeMillis() - pressStartTime >= longPressThreshold
+                    ) {
+                        longPressTriggered = true
+                        isSpeedUp.value = true
+                        vibrate(20)
+                    }
                         } while (true)
 
-                        val dx = upX - touchStartX.value
-                        val dy = upY - touchStartY.value
+                // 抬起后，如果是长按，关闭加速并结束该手势处理
+                if (longPressTriggered) {
+                    isSpeedUp.value = false
+                    return@awaitEachGesture
+                }
 
-                        if (abs(dx) >= swipeThreshold || abs(dy) >= swipeThreshold) {
-                            if (abs(dx) > abs(dy)) {
-                                if (dx > 0) {
-                                    snakeState.value?.changeDirection(Direction.RIGHT)
+                        val swipeDx = upX - touchStartX.value
+                        val swipeDy = upY - touchStartY.value
+
+// 只有在不是暂停状态时才处理滑动
+                        if (!isPaused.value && !isGameOver.value) {
+                            if (abs(swipeDx) >= swipeThreshold || abs(swipeDy) >= swipeThreshold) {
+                                if (abs(swipeDx) > abs(swipeDy)) {
+                                    if (swipeDx > 0) {
+                                        snakeState.value?.changeDirection(Direction.RIGHT)
+                                    } else {
+                                        snakeState.value?.changeDirection(Direction.LEFT)
+                                    }
                                 } else {
-                                    snakeState.value?.changeDirection(Direction.LEFT)
-                                }
-                            } else {
-                                if (dy > 0) {
-                                    snakeState.value?.changeDirection(Direction.DOWN)
-                                } else {
-                                    snakeState.value?.changeDirection(Direction.UP)
+                                    if (swipeDy > 0) {
+                                        snakeState.value?.changeDirection(Direction.DOWN)
+                                    } else {
+                                        snakeState.value?.changeDirection(Direction.UP)
+                                    }
                                 }
                             }
                         }
@@ -293,8 +373,6 @@ fun SnakeGameScreen() {
         GameHUD(
             score = scoreState.value,
             highScore = highScoreState.value,
-            isPaused = isPaused.value,
-            onTogglePause = { isPaused.value = !isPaused.value },
             modifier = Modifier.align(Alignment.TopStart),
         )
 
@@ -321,7 +399,8 @@ fun SnakeGameScreen() {
     }
 
     // 游戏循环：移动/吃食物/重绘
-    LaunchedEffect(gridWidth.value, gridHeight.value) {  // 移除 snakeState.value 依赖
+    LaunchedEffect(gridWidth.value, gridHeight.value) {
+        // 移除 snakeState.value 依赖
         // 等待初始化完成：检查网格尺寸和蛇是否已创建
         if (gridWidth.value == 0 || gridHeight.value == 0 || snakeState.value == null) {
             return@LaunchedEffect
@@ -331,11 +410,11 @@ fun SnakeGameScreen() {
                 val s = snakeState.value
                 if (s != null) {
                     val head = s.move() // 移动蛇
-                    
+
                     // 关键修复：强制更新状态以触发重组
                     // 通过创建一个新的 Snake 对象或者使用 tick 来触发重组
                     snakeState.value = s
-                    
+
                     // 碰撞：墙/自身
                     if (s.checkWallCollision() || s.checkSelfCollision()) {
                         isGameOver.value = true
@@ -384,11 +463,10 @@ fun SnakeGameScreen() {
                     tick.value++
                 }
             }
-            delay(GameConfig.TICK_MS)
+            delay(if (isSpeedUp.value) GameConfig.TICK_MS_FAST else GameConfig.TICK_MS)
         }
     }
 }
-
 
 @Composable
 private fun ModalOverlay(

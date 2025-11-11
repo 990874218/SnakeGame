@@ -13,7 +13,8 @@ object GameConfig {
     const val STRIDE_THRESHOLD3 = 3000   // >3000 隔两行绘
 
     // 循环间隔（毫秒）
-    const val TICK_MS = 150L
+    const val TICK_MS = 200L
+    const val TICK_MS_FAST = 50L
 
     // 吃到食物闪烁帧数
     const val EAT_BLINK_FRAMES = 6

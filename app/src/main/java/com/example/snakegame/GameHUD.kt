@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -18,8 +17,6 @@ import androidx.compose.ui.unit.dp
 fun GameHUD(
     score: Int,
     highScore: Int,
-    isPaused: Boolean,
-    onTogglePause: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier.fillMaxWidth()) {
@@ -37,15 +34,6 @@ fun GameHUD(
                 style = MaterialTheme.typography.titleMedium,
             )
         }
-        Button(
-            onClick = onTogglePause,
-            modifier =
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(12.dp),
-        ) {
-            Text(if (isPaused) "继续" else "暂停")
-        }
+        // 移除暂停按钮
     }
 }
-

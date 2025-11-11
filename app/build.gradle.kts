@@ -4,6 +4,21 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// 自动获取 Git 提交次数作为 versionCode
+fun getVersionCode(): Int {
+    return try {
+        val process = ProcessBuilder("git", "rev-list", "--count", "HEAD")
+            .redirectErrorStream(true)
+            .directory(project.rootDir)
+            .start()
+        val result = process.inputStream.bufferedReader().readText().trim()
+        process.waitFor()
+        result.toIntOrNull() ?: 1
+    } catch (e: Exception) {
+        1  // 如果不是 Git 仓库或命令失败，返回默认值 1
+    }
+}
+
 android {
     namespace = "com.example.snakegame"
     compileSdk {
@@ -14,8 +29,8 @@ android {
         applicationId = "com.example.snakegame"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = getVersionCode() 
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -32,6 +32,15 @@
 - Android 7.0 (API 24) 或更高版本
 - 支持触摸屏的设备
 
+## ⬇️ 下载与安装
+
+- 从 Releases 下载最新 APK：[@Releases 页面](https://github.com/990874218/SnakeGame/releases)
+- 升级安装说明：
+  - 相同包名（applicationId：`com.example.snakegame`）
+  - 相同签名证书
+  - 递增的 versionCode（本项目会自动用 Git 提交数作为 versionCode）
+  满足以上条件，直接覆盖安装不会丢失数据（最高分会保留）。
+
 ## 🚀 构建和运行
 
 ### 前置要求
@@ -44,7 +53,7 @@
 
 1. 克隆仓库：
 ```bash
-git clone https://github.com/你的用户名/SnakeGame.git
+git clone https://github.com/990874218/SnakeGame.git
 cd SnakeGame
 ```
 
@@ -94,9 +103,6 @@ SnakeGame/
 
 本项目采用 MIT 许可证。
 
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
 
 ## 📧 联系方式
 
