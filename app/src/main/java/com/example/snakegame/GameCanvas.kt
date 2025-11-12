@@ -16,6 +16,10 @@ fun GameCanvas(
     snake: Snake?,
     food: Food?,
     isBlink: Boolean,
+    normalBodyColor: Color,
+    normalHeadColor: Color,
+    accentColor: Color,
+    foodColor: Color,
     tick: Int = 0,
     onInit: ((Float, Float) -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -56,7 +60,7 @@ fun GameCanvas(
             val left = f.x * step
             val top = f.y * step
             drawRoundRect(
-                color = Color(0xFFE53935),
+                color = foodColor,
                 topLeft = Offset(left + 4f, top + 4f),
                 size =
                     androidx.compose.ui.geometry
@@ -75,9 +79,9 @@ fun GameCanvas(
                 val top = point.y * step
                 val color =
                     if (isBlink) {
-                        Color(0xFFFFFFFF)
+                        accentColor
                     } else {
-                        if (index == 0) Color(0xFF4CAF50) else Color(0xFF8BC34A)
+                        if (index == 0) normalHeadColor else normalBodyColor
                     }
                 drawRoundRect(
                     color = color,

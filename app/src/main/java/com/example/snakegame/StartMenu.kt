@@ -32,6 +32,7 @@ fun StartMenu(
     versionStatus: String?,
     onStart: () -> Unit,
     onExit: () -> Unit,
+    onOpenSkin: () -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -66,6 +67,8 @@ fun StartMenu(
 
             Spacer(modifier = Modifier.height(16.dp))
             Button(onClick = onStart) { Text("开始游戏") }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = onOpenSkin) { Text("换色") }
             Spacer(modifier = Modifier.height(12.dp))
             Button(onClick = onExit) { Text("退出游戏") }
         }
