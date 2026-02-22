@@ -111,7 +111,7 @@ class GameView
             if (!::snake.isInitialized) return
 
             // 移动蛇
-            val newHead = snake.move()
+            snake.move()
 
             // 撞墙
             if (snake.checkWallCollision()) {
@@ -190,21 +190,31 @@ class GameView
                             snake.changeDirection(Direction.UP)
                         }
                     }
+                    // 调用performClick以支持无障碍访问
+                    performClick()
                     return true
                 }
             }
             return super.onTouchEvent(event)
         }
 
+        override fun performClick(): Boolean {
+            super.performClick()
+            return true
+        }
+
+        @Suppress("unused")
         fun pauseGame() {
             isPaused = true
         }
 
+        @Suppress("unused")
         fun resumeGame() {
             isPaused = false
             if (gameRunnable == null) startGameLoop()
         }
 
+        @Suppress("unused")
         fun restartGame() {
             isGameOver = false
             isPaused = false

@@ -1,19 +1,27 @@
 package com.example.snakegame
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.bluetooth.BluetoothAdapter
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.edit
 import android.media.SoundPool
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -22,8 +30,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -32,8 +44,30 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.snakegame.multiplayer.GameResult
+import com.example.snakegame.multiplayer.GameSessionConfig
+import com.example.snakegame.multiplayer.PlayerInfo
+import com.example.snakegame.multiplayer.PlayerStatus
+import com.example.snakegame.multiplayer.bluetooth.BluetoothController
+import com.example.snakegame.multiplayer.bluetooth.BluetoothLobbyScreen
+import com.example.snakegame.multiplayer.bluetooth.BluetoothPermissionHelper
+import com.example.snakegame.multiplayer.bluetooth.ConnectionSelectScreen
+import com.example.snakegame.multiplayer.bluetooth.FoodState
+import com.example.snakegame.multiplayer.bluetooth.NetProtocol
+import com.example.snakegame.multiplayer.bluetooth.SnakeState
+import com.example.snakegame.multiplayer.lan.LanLobbyScreen
+import com.example.snakegame.multiplayer.lan.LanLobbyViewModel
+import com.example.snakegame.multiplayer.room.CreateRoomScreen
+import com.example.snakegame.multiplayer.room.RoomInfo
+import com.example.snakegame.multiplayer.room.RoomPasswordDialog
+import com.example.snakegame.settings.SettingsRepository
+import com.example.snakegame.settings.SettingsScreen
+import com.example.snakegame.settings.SettingsViewModel
+import com.example.snakegame.settings.VibrationLevel
+import com.example.snakegame.settings.settingsDataStore
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.floor
@@ -53,22 +87,254 @@ fun SnakeGameScreen() {
     val isGameOver = remember { mutableStateOf(false) }
     val snakeState: MutableState<Snake?> = remember { mutableStateOf(null) }
     val inMenu = remember { mutableStateOf(true) }
+    val inSettings = remember { mutableStateOf(false) }
+    val inConnectionSelect = remember { mutableStateOf(false) }
+    val inBluetoothLobby = remember { mutableStateOf(false) }
+    val inCreateRoom = remember { mutableStateOf(false) } // 创建房间界面
+    val inLanLobby = remember { mutableStateOf(false) }
+    val inLanCreateRoom = remember { mutableStateOf(false) }
+    val pendingJoinDevice = remember { mutableStateOf<android.bluetooth.BluetoothDevice?>(null) } // 待加入的设备
+    val pendingRoomPassword = remember { mutableStateOf<String?>(null) } // 待验证的密码
+    val pendingLanRoom = remember { mutableStateOf<RoomInfo?>(null) }
 
     // 获取 context（必须在使用之前声明）
     val context = LocalContext.current
+    val settingsRepository = remember(context) { SettingsRepository(context.settingsDataStore) }
+    val settingsViewModel: SettingsViewModel =
+        viewModel(factory = SettingsViewModel.factory(settingsRepository))
+    val settingsState by settingsViewModel.state.collectAsState()
+    val btController = remember(context) { BluetoothController(context) }
+    val btState by btController.state.collectAsState()
+    val discoveredDevices by btController.discoveredDevices.collectAsState()
+    val isDiscovering by btController.isDiscovering.collectAsState()
+    val bluetoothMessage = remember { mutableStateOf<String?>(null) }
+    val hasScanPermission = remember { mutableStateOf(BluetoothPermissionHelper.hasScanPermissions(context)) }
+    val bluetoothEnabledState = remember { mutableStateOf(BluetoothPermissionHelper.isBluetoothEnabled()) }
+    val lanLobbyViewModel: LanLobbyViewModel = viewModel()
+    val lanUiState by lanLobbyViewModel.uiState.collectAsState()
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+            val granted = result.values.all { it }
+            hasScanPermission.value = granted
+            if (!granted) {
+                bluetoothMessage.value = "需要蓝牙权限才能继续"
+            } else {
+                bluetoothMessage.value = null
+            }
+        }
+    val enableBtLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            bluetoothEnabledState.value = BluetoothPermissionHelper.isBluetoothEnabled()
+            if (!bluetoothEnabledState.value) {
+                bluetoothMessage.value = "请开启蓝牙"
+            } else {
+                bluetoothMessage.value = null
+            }
+        }
+    DisposableEffect(btController) {
+        onDispose {
+            btController.stop()
+        }
+    }
+
+    LaunchedEffect(
+        inBluetoothLobby.value,
+        hasScanPermission.value,
+        bluetoothEnabledState.value,
+        isDiscovering,
+    ) {
+        if (inBluetoothLobby.value &&
+            hasScanPermission.value &&
+            bluetoothEnabledState.value &&
+            !isDiscovering
+        ) {
+            val success = btController.startDiscovery()
+            if (!success) {
+                bluetoothMessage.value = "无法开始扫描，请确认蓝牙已开启并授权"
+            } else {
+                bluetoothMessage.value = null
+            }
+        }
+    }
+
+    LaunchedEffect(inLanLobby.value) {
+        if (inLanLobby.value) {
+            lanLobbyViewModel.startDiscovery()
+        } else {
+            lanLobbyViewModel.stopDiscovery()
+            pendingLanRoom.value = null
+        }
+    }
+
     val highScoreState: MutableState<Int> = remember { mutableStateOf(0) }
 
     // 版本检测状态（只在应用启动时检测一次）
     val versionStatusState: MutableState<String?> = remember { mutableStateOf(null) }
     val currentVersion = remember { VersionChecker.getCurrentVersion(context) }
 
-    // 食物与分数
-    val foodState: MutableState<Food?> = remember { mutableStateOf(null) }
+    // 食物与分数（改为多食物系统）
+    val foodsState: MutableState<List<Food>> = remember { mutableStateOf(emptyList()) }
+    val foodState: MutableState<Food?> = remember { mutableStateOf(null) } // 保留以兼容旧代码
     val scoreState: MutableState<Int> = remember { mutableStateOf(0) }
+
+    // 游戏会话配置
+    val sessionConfig =
+        remember {
+            mutableStateOf(
+                GameSessionConfig(
+                    maxPlayers = 2,
+                    allowWallPass = false,
+                    baseSpeed = settingsState.normalSpeed,
+                    boostMultiplier = settingsState.boostMultiplier,
+                ),
+            )
+        }
+
+    // 多人游戏状态
+    val isMultiplayerMode = remember { derivedStateOf { btState.connected } }
+    val remoteSnakeState: MutableState<Snake?> = remember { mutableStateOf(null) }
+    val localPlayerId = remember { mutableStateOf("local_${System.currentTimeMillis()}") }
+    val remotePlayerId = remember { mutableStateOf<String?>(null) }
+
+    // 在状态声明区域添加（大约在第190行附近）
+// 玩家状态管理
+    val playersState: MutableState<Map<String, PlayerInfo>> =
+        remember {
+            mutableStateOf(emptyMap())
+        }
+    val gameResult: MutableState<GameResult> =
+        remember {
+            mutableStateOf(GameResult.Playing)
+        }
+    val isSpectating: MutableState<Boolean> =
+        remember {
+            mutableStateOf(false)
+        }
+    val deadSnakesState: MutableState<Map<String, Snake>> =
+        remember {
+            mutableStateOf(emptyMap())
+        } // 存储死亡玩家的蛇（用于观战模式显示）
+
+// 初始化玩家信息（在连接成功后）
+    LaunchedEffect(btState.connected, localPlayerId.value, remotePlayerId.value) {
+        if (btState.connected) {
+            val players = mutableMapOf<String, PlayerInfo>()
+            players[localPlayerId.value] =
+                PlayerInfo(
+                    id = localPlayerId.value,
+                    name = "本地玩家",
+                    status = PlayerStatus.ALIVE,
+                    snake = snakeState.value,
+                )
+            remotePlayerId.value?.let { remoteId ->
+                players[remoteId] =
+                    PlayerInfo(
+                        id = remoteId,
+                        name = btState.deviceName ?: "远程玩家",
+                        status = PlayerStatus.ALIVE,
+                        snake = remoteSnakeState.value,
+                    )
+            }
+            playersState.value = players
+            gameResult.value = GameResult.Playing
+            isSpectating.value = false
+        }
+    }
+
+// 检查胜利条件（在游戏循环中，大约在第1100行附近，碰撞检测之后）
+    fun checkVictoryCondition(): GameResult {
+        val players = playersState.value
+        val alivePlayers = players.values.filter { it.status == PlayerStatus.ALIVE }
+
+        return when {
+            alivePlayers.isEmpty() -> GameResult.Draw // 所有人死亡，平局
+            alivePlayers.size == 1 -> {
+                // 只剩一个玩家，获胜
+                GameResult.Victory(alivePlayers.first().id)
+            }
+            else -> GameResult.Playing // 继续游戏
+        }
+    }
+
+// 处理玩家死亡（在碰撞检测后调用）
+    @Suppress("UNUSED")
+    fun handlePlayerDeath(
+        playerId: String,
+        deathPosition: Point,
+    ) {
+        val players = playersState.value.toMutableMap()
+        val player = players[playerId] ?: return
+
+        // 标记为死亡
+        players[playerId] = player.copy(status = PlayerStatus.DEAD)
+        playersState.value = players
+
+        // 如果是本地玩家死亡，进入观战模式
+        if (playerId == localPlayerId.value) {
+            isSpectating.value = true
+            // 保存死亡玩家的蛇（用于显示）
+            snakeState.value?.let { deadSnake ->
+                deadSnakesState.value =
+                    deadSnakesState.value.toMutableMap().apply {
+                        put(playerId, deadSnake)
+                    }
+            }
+        } else {
+            // 远程玩家死亡，也保存其蛇
+            remoteSnakeState.value?.let { deadSnake ->
+                deadSnakesState.value =
+                    deadSnakesState.value.toMutableMap().apply {
+                        put(playerId, deadSnake)
+                    }
+            }
+        }
+
+        // 在死亡位置生成食物（由Host决定）
+        val isHost = btState.isHost == true
+        val isMultiplayer = btState.connected
+        if ((isMultiplayer && isHost) || !isMultiplayer) {
+            val occupied =
+                mutableSetOf<Point>().apply {
+                    // 收集所有存活玩家的蛇体
+                    players.values.filter { it.status == PlayerStatus.ALIVE }.forEach { p ->
+                        p.snake?.getBody()?.let { addAll(it) }
+                    }
+                    // 收集现有食物位置
+                    foodsState.value.forEach { add(Point(it.x, it.y)) }
+                }
+
+            // 在死亡位置生成食物（如果位置可用）
+            if (!occupied.contains(deathPosition)) {
+                val newFood = Food(deathPosition.x, deathPosition.y)
+                val newFoods = foodsState.value.toMutableList()
+                newFoods.add(newFood)
+                foodsState.value = newFoods
+                foodState.value = newFoods.firstOrNull()
+            } else {
+                // 如果死亡位置被占用，在附近生成
+                val nearbyFood = Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                val newFoods = foodsState.value.toMutableList()
+                newFoods.add(nearbyFood)
+                foodsState.value = newFoods
+                foodState.value = newFoods.firstOrNull()
+            }
+        }
+
+        // 检查胜利条件
+        gameResult.value = checkVictoryCondition()
+
+        // 如果游戏结束，设置 isGameOver
+        when (gameResult.value) {
+            is GameResult.Victory, is GameResult.Draw -> {
+                isGameOver.value = true
+            }
+            else -> {}
+        }
+    }
 
     // 加载最高分
     LaunchedEffect(Unit) {
-        highScoreState.value = context.getSharedPreferences(PREFS_NAME, 0).getInt(KEY_HIGH_SCORE, 0)
+        highScoreState.value = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_HIGH_SCORE, 0)
     }
 
     // 只在应用启动时检测一次版本
@@ -86,8 +352,8 @@ fun SnakeGameScreen() {
             }
     }
 
-        // 加速时持续震动：进入加速启动波形震动，退出加速停止
-    //（已移动并改造：持续震动逻辑见下方更靠后位置）
+    // 加速时持续震动：进入加速启动波形震动，退出加速停止
+    // （已移动并改造：持续震动逻辑见下方更靠后位置）
 
     // 每帧自增，驱动重绘
     val tick = remember { mutableStateOf(0) }
@@ -127,46 +393,69 @@ fun SnakeGameScreen() {
         }
 
     // 背景音乐（循环播放）
-    val bgmPlayer = remember {
-        android.media.MediaPlayer.create(context, R.raw.bgm)?.apply {
-            isLooping = true
-            setVolume(0.5f, 0.5f)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                val attrs = android.media.AudioAttributes.Builder()
-                    .setUsage(android.media.AudioAttributes.USAGE_GAME)
-                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build()
+    val bgmPlayer =
+        remember {
+            android.media.MediaPlayer.create(context, R.raw.bgm)?.apply {
+                isLooping = true
+                val initialVolume =
+                    (settingsState.masterVolume * settingsState.musicVolume).coerceIn(0f, 1f)
+                setVolume(initialVolume, initialVolume)
+                val attrs =
+                    android.media.AudioAttributes
+                        .Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_GAME)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
                 setAudioAttributes(attrs)
-            }
-            // 兜底：若循环被打断，完成时重启
-            setOnCompletionListener { mp ->
-                try {
-                    mp.seekTo(0)
-                    mp.start()
-                } catch (_: Exception) {
+                // 兜底：若循环被打断，完成时重启
+                setOnCompletionListener { mp ->
+                    try {
+                        mp.seekTo(0)
+                        mp.start()
+                    } catch (_: Exception) {
+                    }
                 }
             }
         }
-    }
 
     // 背景音量控制（支持临时压低并延时恢复）
-    val bgmNormalVolume = remember { mutableStateOf(0.5f) } // 与上方初始 setVolume 保持一致
+    val bgmNormalVolume =
+        remember {
+            mutableStateOf(
+                (settingsState.masterVolume * settingsState.musicVolume).coerceIn(0f, 1f),
+            )
+        }
     val bgmDuckVolume = 0.3f
     val bgmDuckRestoreMs = 350L
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val scope = rememberCoroutineScope()
     val bgmDuckJob = remember { mutableStateOf<Job?>(null) }
     // 播放音效时临时压低BGM，稍后恢复
     val duckBgm: () -> Unit = duck@{
         val mp = bgmPlayer ?: return@duck
         try {
             mp.setVolume(bgmDuckVolume, bgmDuckVolume)
-        } catch (_: Exception) { }
+        } catch (_: Exception) {
+        }
         bgmDuckJob.value?.cancel()
-        bgmDuckJob.value = scope.launch {
-            delay(bgmDuckRestoreMs)
+        bgmDuckJob.value =
+            scope.launch {
+                delay(bgmDuckRestoreMs)
+                try {
+                    mp.setVolume(bgmNormalVolume.value, bgmNormalVolume.value)
+                } catch (_: Exception) {
+                }
+            }
+    }
+
+    LaunchedEffect(settingsState.masterVolume, settingsState.musicVolume) {
+        val target = (settingsState.masterVolume * settingsState.musicVolume).coerceIn(0f, 1f)
+        bgmNormalVolume.value = target
+        val mp = bgmPlayer
+        if (mp != null) {
             try {
-                mp.setVolume(bgmNormalVolume.value, bgmNormalVolume.value)
-            } catch (_: Exception) { }
+                mp.setVolume(target, target)
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -176,7 +465,7 @@ fun SnakeGameScreen() {
         remember {
             try {
                 soundPool.load(context, R.raw.eat, 1)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 -1 // 如果文件不存在，返回-1
             }
         }
@@ -184,10 +473,20 @@ fun SnakeGameScreen() {
         remember {
             try {
                 soundPool.load(context, R.raw.die, 1)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 -1
             }
         }
+
+    fun vibrationAmplitude(level: VibrationLevel): Int =
+        when (level) {
+            VibrationLevel.LOW -> 90
+            VibrationLevel.MEDIUM -> 160
+            VibrationLevel.HIGH -> 255
+        }
+
+    fun currentSfxVolume(): Float = (settingsState.masterVolume * settingsState.sfxVolume).coerceIn(0f, 1f)
+
     DisposableEffect(Unit) {
         onDispose {
             soundPool.release()
@@ -196,7 +495,81 @@ fun SnakeGameScreen() {
         }
     }
 
-    
+    val previewSfx: () -> Unit = {
+        if (soundEat >= 0) {
+            duckBgm()
+            val volume = currentSfxVolume()
+            soundPool.play(soundEat, volume, volume, 1, 0, 1f)
+        }
+    }
+
+    // 连接成功后自动进入游戏
+    LaunchedEffect(btState.connected, inBluetoothLobby.value, btState.roomInfo, settingsState) {
+        if (btState.connected && inBluetoothLobby.value) {
+            // 更新 sessionConfig
+            val roomInfo = btState.roomInfo
+            sessionConfig.value =
+                GameSessionConfig(
+                    maxPlayers = roomInfo?.maxPlayers ?: 2,
+                    allowWallPass = roomInfo?.allowWallPass ?: false,
+                    baseSpeed = settingsState.normalSpeed,
+                    boostMultiplier = settingsState.boostMultiplier,
+                )
+            // 延迟一小段时间让连接稳定
+            delay(500)
+            // 退出大厅，进入游戏
+            inBluetoothLobby.value = false
+            inMenu.value = false
+            isPaused.value = false
+            isGameOver.value = false
+            // 重置游戏状态
+            if (snakeState.value == null && gridWidth.value > 0 && gridHeight.value > 0) {
+                val snake = Snake(gridWidth.value, gridHeight.value)
+                snakeState.value = snake
+                val occupied = snake.getBody().toSet()
+                // 初始化食物（多人模式根据玩家数，此LaunchedEffect仅在connected时执行）
+                val playerCount = 2
+                val foodCount = GameSessionConfig.calculateFoodCount(playerCount)
+                foodsState.value =
+                    (0 until foodCount).mapNotNull {
+                        Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                    }
+                foodState.value = foodsState.value.firstOrNull() // 兼容旧代码
+                scoreState.value = 0
+            }
+        }
+    }
+
+    // 接收蓝牙消息并更新远程状态
+    LaunchedEffect(btState.connected) {
+        if (!btState.connected) {
+            remoteSnakeState.value = null
+            remotePlayerId.value = null
+            return@LaunchedEffect
+        }
+
+        btController.incomingMessages.collect { line ->
+            val payload = NetProtocol.decodeGameState(line) ?: return@collect
+
+            // 找到远程玩家的蛇（不是本地ID的蛇）
+            val remoteSnake = payload.snakes.firstOrNull { it.id != localPlayerId.value }
+            if (remoteSnake != null) {
+                remotePlayerId.value = remoteSnake.id
+                // 重建远程蛇对象
+                val gridW = gridWidth.value.coerceAtLeast(1)
+                val gridH = gridHeight.value.coerceAtLeast(1)
+                val bodyPoints = remoteSnake.body.map { Point(it.first, it.second) }
+                val newRemoteSnake = Snake.fromBody(gridW, gridH, bodyPoints)
+                remoteSnakeState.value = newRemoteSnake
+            }
+
+            // 如果是Client，同步食物位置（Host决定）
+            if (btState.isHost == false && payload.foods.isNotEmpty()) {
+                foodsState.value = payload.foods.map { Food(it.x, it.y) }
+                foodState.value = foodsState.value.firstOrNull() // 兼容旧代码
+            }
+        }
+    }
 
     fun vibrate(
         ms: Long,
@@ -256,9 +629,10 @@ fun SnakeGameScreen() {
         val offMs = 70L
         // 渐进到满强度所需时间（可调）
         val rampUpMs = 2000L
-        // 最小/最大强度（0~255，建议≥80以保证可感知）
-        val minAmp = 100
-        val maxAmp = 250
+        // 最小/最大强度依据玩家设置
+        val targetAmp = vibrationAmplitude(settingsState.vibrationLevel)
+        val minAmp = (targetAmp * 0.5f).toInt().coerceIn(60, targetAmp)
+        val maxAmp = targetAmp
 
         while (isSpeedUp.value) {
             val elapsed = System.currentTimeMillis() - start
@@ -291,12 +665,16 @@ fun SnakeGameScreen() {
             )
         snakeState.value = newSnake
         scoreState.value = 0
-        foodState.value =
+        // 重置为单人模式食物（1个）
+        val occupied = newSnake.getBody().toSet()
+        val food =
             Food.spawn(
                 gridWidth.value.coerceAtLeast(1),
                 gridHeight.value.coerceAtLeast(1),
-                newSnake.getBody().toSet(),
+                occupied,
             )
+        foodsState.value = listOf(food)
+        foodState.value = food
         tick.value++
     }
 
@@ -304,6 +682,14 @@ fun SnakeGameScreen() {
     val restartGame: () -> Unit = {
         isPaused.value = false
         isGameOver.value = false
+        // 更新 sessionConfig（单人模式）
+        sessionConfig.value =
+            GameSessionConfig(
+                maxPlayers = 1,
+                allowWallPass = false,
+                baseSpeed = settingsState.normalSpeed,
+                boostMultiplier = settingsState.boostMultiplier,
+            )
         // 重新创建蛇
         val newSnake =
             Snake(
@@ -313,14 +699,16 @@ fun SnakeGameScreen() {
         snakeState.value = newSnake
         // 重置分数
         scoreState.value = 0
-        // 重新生成食物（避开蛇体）
+        // 重新生成食物（避开蛇体）- 单人模式1个食物
         val occupied = newSnake.getBody().toSet()
-        foodState.value =
+        val food =
             Food.spawn(
                 gridWidth.value.coerceAtLeast(1),
                 gridHeight.value.coerceAtLeast(1),
                 occupied,
             )
+        foodsState.value = listOf(food)
+        foodState.value = food
         // 触发一次重绘
         tick.value++
     }
@@ -334,6 +722,260 @@ fun SnakeGameScreen() {
                 SkinStore.save(context, newSkin)
             },
             onBack = { inSkin.value = false },
+        )
+        return
+    }
+
+    if (inSettings.value) {
+        SettingsScreen(
+            viewModel = settingsViewModel,
+            onBack = { inSettings.value = false },
+            onPreviewSfx = previewSfx,
+        )
+        return
+    }
+
+    if (inConnectionSelect.value) {
+        ConnectionSelectScreen(
+            onBluetooth = {
+                hasScanPermission.value = BluetoothPermissionHelper.hasScanPermissions(context)
+                bluetoothEnabledState.value = BluetoothPermissionHelper.isBluetoothEnabled()
+                inConnectionSelect.value = false
+                inBluetoothLobby.value = true
+                bluetoothMessage.value = null
+            },
+            onLan = {
+                inConnectionSelect.value = false
+                inLanLobby.value = true
+                inLanCreateRoom.value = false
+                lanLobbyViewModel.startDiscovery()
+            },
+            onBack = {
+                inConnectionSelect.value = false
+                // 直接返回主菜单
+            },
+            statusText = bluetoothMessage.value,
+        )
+        return
+    }
+
+    if (inLanLobby.value) {
+        if (inLanCreateRoom.value) {
+            CreateRoomScreen(
+                connectionType = RoomInfo.ConnectionType.LAN,
+                onConfirm = { result ->
+                    val hostName = Build.MODEL ?: "LAN Host"
+                    lanLobbyViewModel.hostRoom(hostName, result)
+                    inLanCreateRoom.value = false
+                },
+                onCancel = { inLanCreateRoom.value = false },
+            )
+            return
+        }
+
+        pendingLanRoom.value?.takeIf { it.isPasswordProtected }?.let { room ->
+            RoomPasswordDialog(
+                roomName = room.name,
+                onConfirm = { password ->
+                    pendingLanRoom.value = null
+                    lanLobbyViewModel.connectTo(room, password)
+                },
+                onCancel = { pendingLanRoom.value = null },
+            )
+        }
+
+        LanLobbyScreen(
+            uiState = lanUiState,
+            onCreateRoom = {
+                inLanCreateRoom.value = true
+            },
+            onJoinRoom = { room ->
+                if (room.isPasswordProtected) {
+                    pendingLanRoom.value = room
+                } else {
+                    lanLobbyViewModel.connectTo(room)
+                }
+            },
+            onRefresh = { lanLobbyViewModel.startDiscovery() },
+            onExit = {
+                inLanLobby.value = false
+                inConnectionSelect.value = true
+                lanLobbyViewModel.stopDiscovery()
+                lanLobbyViewModel.disconnectClient()
+                lanLobbyViewModel.stopHosting()
+            },
+            onStopHosting = { lanLobbyViewModel.stopHosting() },
+        )
+        return
+    }
+
+    if (inBluetoothLobby.value) {
+        // 显示创建房间界面
+        if (inCreateRoom.value) {
+            CreateRoomScreen(
+                connectionType = RoomInfo.ConnectionType.BLUETOOTH,
+                onConfirm = { result ->
+                    @Suppress("DEPRECATION")
+                    val adapter = BluetoothAdapter.getDefaultAdapter()
+                    val deviceName =
+                        try {
+                            adapter?.name ?: "未知设备"
+                        } catch (_: SecurityException) {
+                            "未知设备"
+                        }
+
+                    @SuppressLint("MissingPermission", "HardwareIds")
+                    val deviceAddress =
+                        try {
+                            // Android 12+ 无法获取 MAC 地址，直接使用备用方案
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                result.name.hashCode().toString()
+                            } else {
+                                adapter?.address?.takeIf { it.isNotBlank() }
+                                    ?: result.name.hashCode().toString()
+                            }
+                        } catch (_: SecurityException) {
+                            result.name.hashCode().toString()
+                        }
+                    val roomInfo =
+                        RoomInfo(
+                            id = deviceAddress,
+                            name = result.name,
+                            connectionType = RoomInfo.ConnectionType.BLUETOOTH,
+                            hostAddress = deviceAddress,
+                            hostName = deviceName,
+                            maxPlayers = result.maxPlayers,
+                            currentPlayers = 1,
+                            allowWallPass = result.allowWallPass,
+                            password = result.password,
+                            hasPassword = !result.password.isNullOrBlank(),
+                            port = null,
+                        )
+                    btController.setRoomInfo(roomInfo)
+                    btController.startHost(roomInfo)
+                    inCreateRoom.value = false
+                    bluetoothMessage.value = null
+                },
+                onCancel = {
+                    inCreateRoom.value = false
+                },
+            )
+            return
+        }
+
+        // 显示密码输入对话框
+        pendingJoinDevice.value?.let { device ->
+            // 注意：在蓝牙模式下，我们无法直接从设备获取房间信息
+            // 这里简化处理，假设需要密码时弹出对话框
+            // 实际应用中，可以通过设备名称或其他方式传递房间信息
+            val deviceName =
+                try {
+                    device.name ?: "未知房间"
+                } catch (_: SecurityException) {
+                    "未知房间"
+                }
+            RoomPasswordDialog(
+                roomName = deviceName,
+                onConfirm = { password ->
+                    pendingRoomPassword.value = password
+                    // 创建房间信息（简化处理，实际应该从设备获取）
+                    val roomInfo =
+                        btController.createRoomInfoFromDevice(
+                            device = device,
+                            roomName = deviceName,
+                            password = password,
+                        )
+                    btController.setRoomInfo(roomInfo)
+                    btController.connectTo(device)
+                    pendingJoinDevice.value = null
+                },
+                onCancel = {
+                    pendingJoinDevice.value = null
+                },
+            )
+        }
+
+        if (!hasScanPermission.value) {
+            BluetoothRequirementScreen(
+                title = "需要授权",
+                message = "扫描附近设备需要授予蓝牙/定位权限。",
+                buttonText = "去授权",
+                onConfirm = {
+                    permissionLauncher.launch(BluetoothPermissionHelper.scanPermissions)
+                },
+                onBack = {
+                    inBluetoothLobby.value = false
+                    inConnectionSelect.value = true
+                },
+            )
+            return
+        }
+
+        if (!bluetoothEnabledState.value) {
+            BluetoothRequirementScreen(
+                title = "开启蓝牙",
+                message = "请先开启蓝牙以继续多人联机。",
+                buttonText = "打开蓝牙",
+                onConfirm = {
+                    val intent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+                    enableBtLauncher.launch(intent)
+                },
+                onBack = {
+                    inBluetoothLobby.value = false
+                    inConnectionSelect.value = true
+                },
+            )
+            return
+        }
+
+        val statusText =
+            bluetoothMessage.value
+                ?: when {
+                    btState.error != null -> "错误：${btState.error}"
+                    btState.connected ->
+                        "已连接${btState.deviceName?.let { "：$it" } ?: ""}"
+                    btState.isHost == true -> "等待玩家加入..."
+                    btState.isHost == false ->
+                        "正在连接${btState.deviceName?.let { "：$it" } ?: ""}"
+                    else -> "未连接"
+                }
+        BluetoothLobbyScreen(
+            isHosting = btState.isHost,
+            onHost = {
+                bluetoothMessage.value = null
+                inCreateRoom.value = true // 打开创建房间界面
+            },
+            onScan = {
+                bluetoothMessage.value = null
+                val success = btController.startDiscovery()
+                if (!success) {
+                    bluetoothMessage.value = "无法开始扫描，请确认蓝牙已开启并授权"
+                }
+            },
+            onJoin = { device ->
+                bluetoothMessage.value = null
+                // 简化处理：直接尝试连接，如果需要密码会在连接时处理
+                // 实际应用中，应该先检查设备是否有密码保护
+                pendingJoinDevice.value = device
+            },
+            onBack = {
+                inBluetoothLobby.value = false
+                inConnectionSelect.value = true
+                bluetoothMessage.value = null
+                btController.stop()
+            },
+            statusText = statusText,
+            pairedDevices = btController.bondedDevices().toList(),
+            discoveredDevices = discoveredDevices,
+            isScanning = isDiscovering,
+            isConnected = btState.connected,
+            onStartGame = {
+                inBluetoothLobby.value = false
+                inMenu.value = false
+                isPaused.value = false
+                isGameOver.value = false
+            },
+            roomInfo = btState.roomInfo, // 传递房间信息
         )
         return
     }
@@ -352,6 +994,17 @@ fun SnakeGameScreen() {
             },
             onOpenSkin = {
                 inSkin.value = true
+            },
+            onOpenSettings = {
+                inSettings.value = true
+            },
+            onOpenMultiplayer = {
+                hasScanPermission.value = BluetoothPermissionHelper.hasScanPermissions(context)
+                bluetoothEnabledState.value = BluetoothPermissionHelper.isBluetoothEnabled()
+                // 直接进入连接选择界面，跳过模式选择
+                inConnectionSelect.value = true
+                inBluetoothLobby.value = false
+                bluetoothMessage.value = null
             },
         )
         return
@@ -386,7 +1039,7 @@ fun SnakeGameScreen() {
                         if (timeSinceLastTap < doubleTapTimeout && tapDistance < doubleTapDistanceThreshold) {
                             // 检测到双击，切换暂停状态 + 轻微震动反馈
                             isPaused.value = !isPaused.value
-                            vibrate(30) // 20~40ms 均可
+                            vibrate(30, vibrationAmplitude(settingsState.vibrationLevel)) // 20~40ms 均可
                             lastTapTime.value = 0L // 重置，防止三击
                             return@awaitEachGesture
                         }
@@ -403,8 +1056,7 @@ fun SnakeGameScreen() {
                         var upY = touchStartY.value
 
                         // 长按检测参数
-                        val longPressThreshold = 200L //加速判定阈值
-                        val longPressMoveSlop = 15f // 新增：长按期间允许的最大位移（像素）
+                        val longPressThreshold = 200L // 加速判定阈值
                         val pressStartTime = System.currentTimeMillis()
                         var longPressTriggered = false
 
@@ -424,7 +1076,7 @@ fun SnakeGameScreen() {
                             ) {
                                 longPressTriggered = true
                                 isSpeedUp.value = true
-                                vibrate(20)
+                                vibrate(20, vibrationAmplitude(settingsState.vibrationLevel))
                             }
                         } while (true)
 
@@ -465,13 +1117,15 @@ fun SnakeGameScreen() {
             cellSizePx = cellSizePx.value,
             renderStride = renderStride.value,
             snake = snakeState.value,
-            food = foodState.value,
+            food = foodState.value, // 保留以兼容旧代码
             isBlink = (eatBlinkFrames.value > 0) || isSpeedUp.value, // 修改：加速也触发同款闪烁
             normalBodyColor = skinState.value.normalBody,
             normalHeadColor = SkinColorUtil.darker(skinState.value.normalBody),
             accentColor = skinState.value.accent,
             foodColor = skinState.value.food,
             tick = tick.value,
+            remoteSnake = if (isMultiplayerMode.value) remoteSnakeState.value else null,
+            foods = foodsState.value, // 传递多食物列表
             onInit = { w, h ->
                 // 初始化网格和蛇/食物（根据屏幕尺寸自适应网格与单元格像素，并做大屏优化）
                 if (gridWidth.value == 0 || gridHeight.value == 0) {
@@ -494,9 +1148,11 @@ fun SnakeGameScreen() {
 
                     val snake = Snake(gridWidth.value, gridHeight.value)
                     snakeState.value = snake
-                    // 初次生成食物
+                    // 初次生成食物（单人模式1个）
                     val occupied = snake.getBody().toSet()
-                    foodState.value = Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                    val food = Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                    foodsState.value = listOf(food)
+                    foodState.value = food
                     scoreState.value = 0
 
                     // 标记初始化完成
@@ -519,7 +1175,6 @@ fun SnakeGameScreen() {
                 title = "暂停中",
                 primaryText = "继续游戏",
                 onPrimary = { isPaused.value = false },
-                secondaryText = "返回菜单",
                 onSecondary = goToMenu,
             )
         }
@@ -529,70 +1184,180 @@ fun SnakeGameScreen() {
                 title = "游戏结束",
                 primaryText = "重新开始",
                 onPrimary = { restartGame() },
-                secondaryText = "返回菜单",
                 onSecondary = goToMenu,
             )
         }
     }
 
     // 游戏循环：移动/吃食物/重绘
-    LaunchedEffect(gridWidth.value, gridHeight.value) {
-        // 移除 snakeState.value 依赖
+    LaunchedEffect(gridWidth.value, gridHeight.value, btState.connected, sessionConfig.value) {
         // 等待初始化完成：检查网格尺寸和蛇是否已创建
         if (gridWidth.value == 0 || gridHeight.value == 0 || snakeState.value == null) {
             return@LaunchedEffect
         }
+
+        val isMultiplayer = btState.connected
+        val isHost = btState.isHost == true
+        val allowWallPass = sessionConfig.value.allowWallPass
+
         while (true) {
             if (!isPaused.value && !isGameOver.value && !inMenu.value) {
-                val s = snakeState.value
-                if (s != null) {
-                    val head = s.move() // 移动蛇
+                val localSnake = snakeState.value
+                if (localSnake != null) {
+                    // 使用 sessionConfig 的 allowWallPass 参数
+                    val head = localSnake.move(allowWallPass = allowWallPass)
 
                     // 关键修复：强制更新状态以触发重组
-                    // 通过创建一个新的 Snake 对象或者使用 tick 来触发重组
-                    snakeState.value = s
+                    snakeState.value = localSnake
 
-                    // 碰撞：墙/自身
-                    if (s.checkWallCollision() || s.checkSelfCollision()) {
+                    // 多人模式：检查撞到远程蛇
+                    if (isMultiplayer) {
+                        val remoteSnake = remoteSnakeState.value
+                        if (remoteSnake != null) {
+                            val remoteBody = remoteSnake.getBody()
+                            if (remoteBody.any { it.x == head.x && it.y == head.y }) {
+                                isGameOver.value = true
+                                // 死亡音效和震动
+                                if (soundDie >= 0) {
+                                    duckBgm()
+                                    val volume = currentSfxVolume()
+                                    soundPool.play(soundDie, volume, volume, 1, 0, 1f)
+                                }
+                                val deathAmp =
+                                    (vibrationAmplitude(settingsState.vibrationLevel) * 0.8f)
+                                        .toInt()
+                                        .coerceIn(40, 255)
+                                vibrate(80, deathAmp)
+                                // 继续循环，等待下一帧
+                                val baseTick =
+                                    (GameConfig.TICK_MS.toFloat() / sessionConfig.value.baseSpeed.coerceAtLeast(0.1f))
+                                        .toLong()
+                                        .coerceAtLeast(30L)
+                                val boostTick =
+                                    (baseTick.toFloat() / sessionConfig.value.boostMultiplier.coerceAtLeast(1f))
+                                        .toLong()
+                                        .coerceAtLeast(15L)
+                                delay(if (isSpeedUp.value) boostTick else baseTick)
+                                continue
+                            }
+                        }
+                    }
+
+                    // 碰撞：墙/自身（使用 sessionConfig 的 allowWallPass 参数）
+                    if (localSnake.checkWallCollision(allowWallPass = allowWallPass) || localSnake.checkSelfCollision()) {
                         isGameOver.value = true
                         // 死亡音效 + 震动
                         if (soundDie >= 0) {
                             // 立即压低 BGM，随后自动恢复（若已暂停将保持暂停）
                             duckBgm()
-                            soundPool.play(soundDie, 1f, 1f, 1, 0, 1f)
+                            val volume = currentSfxVolume()
+                            soundPool.play(soundDie, volume, volume, 1, 0, 1f)
                         }
-                        vibrate(80) // 80ms
+                        val deathAmp =
+                            (vibrationAmplitude(settingsState.vibrationLevel) * 0.8f)
+                                .toInt()
+                                .coerceIn(40, 255)
+                        vibrate(80, deathAmp) // 80ms
                     } else {
-                        // 吃食物：蛇头命中食物
-                        val f = foodState.value
-                        if (f != null && s.isHeadAt(f.x, f.y)) {
-                            s.grow()
+                        // 吃食物：检查是否吃到任何食物
+                        val currentFoods = foodsState.value
+                        val eatenFoodIndex =
+                            currentFoods.indexOfFirst { food ->
+                                localSnake.isHeadAt(food.x, food.y)
+                            }
+
+                        if (eatenFoodIndex >= 0) {
+                            // 吃到食物
+                            localSnake.grow()
                             scoreState.value += GameConfig.SCORE_PER_FOOD
 
-                            // 最高分持久化
-                            if (scoreState.value > highScoreState.value) {
+                            // 最高分持久化（仅单人模式）
+                            if (!isMultiplayer && scoreState.value > highScoreState.value) {
                                 highScoreState.value = scoreState.value
-                                context
-                                    .getSharedPreferences(PREFS_NAME, 0)
-                                    .edit()
-                                    .putInt(KEY_HIGH_SCORE, highScoreState.value)
-                                    .apply()
+                                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit {
+                                    putInt(KEY_HIGH_SCORE, highScoreState.value)
+                                }
                             }
 
                             // 音效 + 震动 + 闪烁
                             if (soundEat >= 0) {
                                 // 立即压低 BGM，随后自动恢复
                                 duckBgm()
-                                soundPool.play(soundEat, 1f, 1f, 1, 0, 1f)
+                                val volume = currentSfxVolume()
+                                soundPool.play(soundEat, volume, volume, 1, 0, 1f)
                             }
-                            vibrate(20) // 20ms 轻微震动
+                            vibrate(20, vibrationAmplitude(settingsState.vibrationLevel)) // 20ms 轻微震动
                             eatBlinkFrames.value = GameConfig.EAT_BLINK_FRAMES
 
-                            // 重新生成食物（避开蛇体）
-                            val occupied = s.getBody().toSet()
-                            foodState.value =
-                                Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                            // 移除被吃的食物
+                            val newFoods = currentFoods.toMutableList()
+                            newFoods.removeAt(eatenFoodIndex)
+                            foodsState.value = newFoods
+                            foodState.value = newFoods.firstOrNull() // 兼容旧代码
+
+                            // 规则：只有场上没有食物时才刷新新食物
+                            // 多人模式：只有Host决定食物位置
+                            if (newFoods.isEmpty() && (isMultiplayer && isHost || !isMultiplayer)) {
+                                val occupied =
+                                    mutableSetOf<Point>().apply {
+                                        addAll(localSnake.getBody())
+                                        if (isMultiplayer) {
+                                            remoteSnakeState.value?.getBody()?.let { addAll(it) }
+                                        }
+                                        // 添加现有食物位置（虽然已经为空，但保留逻辑）
+                                        newFoods.forEach { add(Point(it.x, it.y)) }
+                                    }
+
+                                // 计算应该有多少个食物
+                                val playerCount = if (isMultiplayer) 2 else 1
+                                val targetFoodCount = GameSessionConfig.calculateFoodCount(playerCount)
+
+                                // 生成新食物直到达到目标数量
+                                val spawnedFoods = mutableListOf<Food>()
+                                var attempts = 0
+                                while (spawnedFoods.size < targetFoodCount && attempts < 1000) {
+                                    val newFood = Food.spawn(gridWidth.value, gridHeight.value, occupied)
+                                    if (!spawnedFoods.any { it.x == newFood.x && it.y == newFood.y }) {
+                                        spawnedFoods.add(newFood)
+                                        occupied.add(Point(newFood.x, newFood.y))
+                                    }
+                                    attempts++
+                                }
+
+                                foodsState.value = spawnedFoods
+                                foodState.value = spawnedFoods.firstOrNull() // 兼容旧代码
+                            }
                         }
+                    }
+
+                    // 多人模式：发送游戏状态（localSnake在此处已确保不为null）
+                    if (isMultiplayer) {
+                        val snakes =
+                            buildList<SnakeState> {
+                                add(
+                                    SnakeState(
+                                        localPlayerId.value,
+                                        localSnake.getBody().map { it.x to it.y },
+                                    ),
+                                )
+                                remoteSnakeState.value?.let { remote ->
+                                    add(
+                                        SnakeState(
+                                            remotePlayerId.value ?: "remote",
+                                            remote.getBody().map { it.x to it.y },
+                                        ),
+                                    )
+                                }
+                            }
+                        val foods = foodsState.value.map { FoodState(it.x, it.y) }
+                        val stateJson =
+                            NetProtocol.encodeGameState(
+                                snakes = snakes,
+                                foods = foods, // 改为多食物列表
+                                score = scoreState.value,
+                                tick = tick.value,
+                            )
+                        btController.send(stateJson)
                     }
 
                     // 闪烁帧数衰减（在状态更新后）
@@ -604,7 +1369,16 @@ fun SnakeGameScreen() {
                     tick.value++
                 }
             }
-            delay(if (isSpeedUp.value) GameConfig.TICK_MS_FAST else GameConfig.TICK_MS)
+            // 使用 sessionConfig 的速度参数
+            val baseTick =
+                (GameConfig.TICK_MS.toFloat() / sessionConfig.value.baseSpeed.coerceAtLeast(0.1f))
+                    .toLong()
+                    .coerceAtLeast(30L)
+            val boostTick =
+                (baseTick.toFloat() / sessionConfig.value.boostMultiplier.coerceAtLeast(1f))
+                    .toLong()
+                    .coerceAtLeast(15L)
+            delay(if (isSpeedUp.value) boostTick else baseTick)
         }
     }
 }
@@ -614,8 +1388,8 @@ private fun ModalOverlay(
     title: String,
     primaryText: String,
     onPrimary: () -> Unit,
-    secondaryText: String,
     onSecondary: () -> Unit,
+    secondaryText: String = "返回菜单",
 ) {
     Box(
         modifier =
@@ -633,5 +1407,31 @@ private fun ModalOverlay(
             Spacer(modifier = Modifier.padding(top = 8.dp))
             Button(onClick = onSecondary) { Text(secondaryText) }
         }
+    }
+}
+
+@Composable
+private fun BluetoothRequirementScreen(
+    title: String,
+    message: String,
+    buttonText: String,
+    onConfirm: () -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(
+        modifier =
+            Modifier
+                .fillMaxSize()
+                .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleLarge)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(message, style = MaterialTheme.typography.bodyLarge)
+        Spacer(modifier = Modifier.height(24.dp))
+        Button(onClick = onConfirm) { Text(buttonText) }
+        Spacer(modifier = Modifier.height(12.dp))
+        Button(onClick = onBack) { Text("返回") }
     }
 }

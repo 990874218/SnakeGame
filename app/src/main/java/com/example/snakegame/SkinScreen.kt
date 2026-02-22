@@ -163,7 +163,7 @@ private fun ColorPickerDialog(
                     Text("R: $r")
                     // 循环图标样式的随机配色按钮
                     Button(onClick = onRandom) {
-                        Text("🔄 随机")
+                        Text("🔄 ")
                     }
                 }
                 Slider(value = r / 255f, onValueChange = { r = (it * 255).toInt() })
