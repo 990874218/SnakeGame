@@ -33,6 +33,8 @@ fun StartMenu(
     onStart: () -> Unit,
     onExit: () -> Unit,
     onOpenSkin: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenMultiplayer: () -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -69,6 +71,10 @@ fun StartMenu(
             Button(onClick = onStart) { Text("开始游戏") }
             Spacer(modifier = Modifier.height(12.dp))
             Button(onClick = onOpenSkin) { Text("换色") }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = onOpenSettings) { Text("设置") }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(onClick = onOpenMultiplayer) { Text("多人") }
             Spacer(modifier = Modifier.height(12.dp))
             Button(onClick = onExit) { Text("退出游戏") }
         }

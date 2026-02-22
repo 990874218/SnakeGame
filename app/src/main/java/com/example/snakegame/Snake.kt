@@ -14,13 +14,13 @@ class Snake(
 ) {
     // 蛇的身体（每个元素是一个网格坐标点）
     // 第一个元素是蛇头，最后一个元素是蛇尾
-    private val body = mutableListOf<Point>()
+    internal val body = mutableListOf<Point>()
 
     // 当前移动方向
-    private var currentDirection: Direction = Direction.RIGHT
+    internal var currentDirection: Direction = Direction.RIGHT
 
     // 下一个方向（用于处理快速连续的方向改变）
-    private var nextDirection: Direction = Direction.RIGHT
+    internal var nextDirection: Direction = Direction.RIGHT
 
     // 是否需要在下次移动时增长（吃到食物后）
     private var shouldGrow: Boolean = false
@@ -36,6 +36,36 @@ class Snake(
         body.add(Point(startX - 2, startY)) // 尾巴
     }
 
+    companion object {
+        /**
+         * 从身体坐标列表重建蛇（用于网络同步）
+         */
+        fun fromBody(
+            gridWidth: Int,
+            gridHeight: Int,
+            bodyPoints: List<Point>,
+        ): Snake {
+            val snake = Snake(gridWidth, gridHeight)
+            snake.body.clear()
+            snake.body.addAll(bodyPoints)
+            // 根据身体推断方向
+            if (bodyPoints.size >= 2) {
+                val head = bodyPoints[0]
+                val neck = bodyPoints[1]
+                snake.currentDirection =
+                    when {
+                        head.x > neck.x -> Direction.RIGHT
+                        head.x < neck.x -> Direction.LEFT
+                        head.y > neck.y -> Direction.DOWN
+                        head.y < neck.y -> Direction.UP
+                        else -> Direction.RIGHT
+                    }
+                snake.nextDirection = snake.currentDirection
+            }
+            return snake
+        }
+    }
+
     /**
      * 获取蛇头位置
      */
@@ -46,6 +76,12 @@ class Snake(
      */
     fun getBody(): List<Point> {
         return body.toList() // 返回副本，防止外部修改
+    }
+
+    fun overrideBody(points: List<Point>) {
+        if (points.isEmpty()) return
+        body.clear()
+        body.addAll(points)
     }
 
     /**
@@ -81,31 +117,25 @@ class Snake(
      * 移动蛇
      * @return 新的蛇头位置
      */
-    fun move(): Point {
-        // 更新当前方向
+    fun move(allowWallPass: Boolean = false): Point {
         currentDirection = nextDirection
-
-        // 计算新的蛇头位置
         val head = body[0]
-        val newHead =
+        var newHead =
             when (currentDirection) {
                 Direction.UP -> Point(head.x, head.y - 1)
                 Direction.DOWN -> Point(head.x, head.y + 1)
                 Direction.LEFT -> Point(head.x - 1, head.y)
                 Direction.RIGHT -> Point(head.x + 1, head.y)
             }
-
-        // 将新头部添加到身体前面
-        body.add(0, newHead)
-
-        // 如果没有吃到食物，移除尾部（保持长度不变）
-        // 如果吃到食物，保留尾部（蛇会变长）
-        if (!shouldGrow) {
-            body.removeAt(body.size - 1)
-        } else {
-            shouldGrow = false // 重置增长标志
+        if (allowWallPass) {
+            newHead =
+                Point(
+                    (newHead.x + gridWidth) % gridWidth,
+                    (newHead.y + gridHeight) % gridHeight,
+                )
         }
-
+        body.add(0, newHead)
+        if (!shouldGrow) body.removeAt(body.size - 1) else shouldGrow = false
         return newHead
     }
 
@@ -134,10 +164,10 @@ class Snake(
     /**
      * 检查蛇头是否撞到墙壁
      */
-    fun checkWallCollision(): Boolean {
+    fun checkWallCollision(allowWallPass: Boolean = false): Boolean {
+        if (allowWallPass) return false
         val head = body[0]
-        return head.x < 0 || head.x >= gridWidth ||
-            head.y < 0 || head.y >= gridHeight
+        return head.x < 0 || head.x >= gridWidth || head.y < 0 || head.y >= gridHeight
     }
 
     /**
